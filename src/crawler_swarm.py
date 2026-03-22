@@ -1,51 +1,52 @@
 import random
 import time
-import asyncio
-from typing import List, Tuple
+import requests
+from multiprocessing import Process, Queue
 
 class CrawlerNode:
-    def __init__(self, node_id: str):
+    def __init__(self, node_id):
         self.node_id = node_id
-        self.task_queue = asyncio.Queue()
-        self.load = 0
+        self.task_queue = Queue()
+        self.health = 100
 
-    async def run(self):
+    def crawl(self):
         while True:
-            task = await self.task_queue.get()
-            await self.process_task(task)
-            self.task_queue.task_done()
-            self.load -= 1
+            if not self.task_queue.empty():
+                url = self.task_queue.get()
+                try:
+                    response = requests.get(url)
+                    print(f'Node {self.node_id} crawled {url} - Status code: {response.status_code}')
+                    self.health += 10
+                except:
+                    self.health -= 20
+                    print(f'Node {self.node_id} failed to crawl {url} - Health: {self.health}')
+            else:
+                time.sleep(1)
 
-    async def process_task(self, task):
-        # Implement task processing logic here
-        await asyncio.sleep(random.uniform(0.5, 2.0))
+            if self.health <= 0:
+                print(f'Node {self.node_id} has failed, restarting...')
+                self.__init__(self.node_id)
+                print(f'Node {self.node_id} restarted successfully')
 
 class CrawlerSwarm:
-    def __init__(self, num_nodes: int):
-        self.nodes: List[CrawlerNode] = [CrawlerNode(f'node_{i}') for i in range(num_nodes)]
-        self.tasks: List[Tuple[str, str]] = []
+    def __init__(self, num_nodes):
+        self.num_nodes = num_nodes
+        self.nodes = []
+        self.load_balancer = LoadBalancer(self.nodes)
 
-    async def add_task(self, url: str, domain: str):
-        self.tasks.append((url, domain))
-        await self.allocate_task()
+        for i in range(num_nodes):
+            node = CrawlerNode(i)
+            self.nodes.append(node)
+            node_process = Process(target=node.crawl)
+            node_process.start()
 
-    async def allocate_task(self):
-        least_loaded_node = min(self.nodes, key=lambda node: node.load)
-        task = self.tasks.pop(0)
-        await least_loaded_node.task_queue.put(task)
-        least_loaded_node.load += 1
+    def add_task(self, url):
+        self.load_balancer.add_task(url)
 
-    async def run(self):
-        tasks = [node.run() for node in self.nodes]
-        await asyncio.gather(*tasks)
+class LoadBalancer:
+    def __init__(self, nodes):
+        self.nodes = nodes
 
-if __name__ == '__main__':
-    swarm = CrawlerSwarm(num_nodes=10)
-
-    async def main():
-        await swarm.add_task('https://www.example.com', 'example.com')
-        await swarm.add_task('https://www.google.com', 'google.com')
-        await swarm.add_task('https://www.reddit.com', 'reddit.com')
-        await swarm.run()
-
-    asyncio.run(main())
+    def add_task(self, url):
+        healthiest_node = max(self.nodes, key=lambda node: node.health)
+        healthiest_node.task_queue.put(url)
