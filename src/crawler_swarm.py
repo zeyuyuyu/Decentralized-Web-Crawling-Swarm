@@ -1,123 +1,83 @@
 import asyncio
-from typing import List, Dict, Set
+from typing import List, Set, Dict
+from urllib.parse import urlparse
 import aiohttp
-import logging
-from dataclasses import dataclass
-from datetime import datetime
-import random
-
-@dataclass
-class CrawlerNode:
-    id: str
-    last_heartbeat: datetime
-    urls_processing: Set[str]
-    urls_completed: Set[str]
-    failure_count: int
+from collections import defaultdict
+import time
 
 class CrawlerSwarm:
-    def __init__(self, max_nodes: int = 10):
-        self.nodes: Dict[str, CrawlerNode] = {}
-        self.max_nodes = max_nodes
+    def __init__(self, max_workers: int = 10, requests_per_second: int = 5):
+        self.max_workers = max_workers
+        self.requests_per_second = requests_per_second
+        self.visited_urls: Set[str] = set()
         self.url_queue: asyncio.Queue = asyncio.Queue()
-        self.results: Dict[str, dict] = {}
-        self.node_timeout = 30  # seconds
-        self.logger = logging.getLogger(__name__)
-
-    async def register_node(self, node_id: str) -> bool:
-        if len(self.nodes) >= self.max_nodes:
-            return False
-            
-        self.nodes[node_id] = CrawlerNode(
-            id=node_id,
-            last_heartbeat=datetime.now(),
-            urls_processing=set(),
-            urls_completed=set(),
-            failure_count=0
-        )
-        self.logger.info(f'Node {node_id} registered')
-        return True
-
-    async def heartbeat(self, node_id: str) -> None:
-        if node_id in self.nodes:
-            self.nodes[node_id].last_heartbeat = datetime.now()
-
-    async def monitor_nodes(self):
-        while True:
-            now = datetime.now()
-            dead_nodes = []
-            
-            for node_id, node in self.nodes.items():
-                time_diff = (now - node.last_heartbeat).total_seconds()
-                if time_diff > self.node_timeout:
-                    dead_nodes.append(node_id)
-                    self.logger.warning(f'Node {node_id} appears dead, redistributing work')
-                    
-            for node_id in dead_nodes:
-                # Redistribute unfinished work
-                dead_node = self.nodes[node_id]
-                for url in dead_node.urls_processing:
-                    await self.url_queue.put(url)
-                del self.nodes[node_id]
-                
-            await asyncio.sleep(5)
-
-    async def assign_work(self, node_id: str) -> List[str]:
-        if node_id not in self.nodes:
+        self.domain_queues: Dict[str, asyncio.Queue] = defaultdict(asyncio.Queue)
+        self.domain_last_request: Dict[str, float] = defaultdict(float)
+        self.session: aiohttp.ClientSession = None
+    
+    async def initialize(self):
+        self.session = aiohttp.ClientSession()
+    
+    async def close(self):
+        if self.session:
+            await self.session.close()
+    
+    def get_domain(self, url: str) -> str:
+        return urlparse(url).netloc
+    
+    async def rate_limit(self, domain: str):
+        current_time = time.time()
+        time_since_last = current_time - self.domain_last_request[domain]
+        if time_since_last < (1.0 / self.requests_per_second):
+            await asyncio.sleep((1.0 / self.requests_per_second) - time_since_last)
+        self.domain_last_request[domain] = time.time()
+    
+    async def crawl_url(self, url: str) -> List[str]:
+        if url in self.visited_urls:
             return []
-            
-        node = self.nodes[node_id]
-        work_batch = []
         
-        # Determine batch size based on node performance
-        batch_size = 10 / (node.failure_count + 1)  # Reduce batch for unreliable nodes
-        batch_size = max(1, min(10, int(batch_size)))
+        domain = self.get_domain(url)
+        await self.rate_limit(domain)
         
         try:
-            for _ in range(batch_size):
-                if self.url_queue.empty():
-                    break
-                url = await self.url_queue.get()
-                work_batch.append(url)
-                node.urls_processing.add(url)
+            async with self.session.get(url) as response:
+                if response.status == 200:
+                    self.visited_urls.add(url)
+                    text = await response.text()
+                    # Basic link extraction - could be enhanced
+                    found_urls = []
+                    # Process page content here
+                    return found_urls
         except Exception as e:
-            self.logger.error(f'Error assigning work to node {node_id}: {str(e)}')
+            print(f"Error crawling {url}: {e}")
+            return []
+    
+    async def worker(self):
+        while True:
+            url = await self.url_queue.get()
+            domain = self.get_domain(url)
+            await self.domain_queues[domain].put(url)
             
-        return work_batch
-
-    async def submit_results(self, node_id: str, results: Dict[str, dict]) -> None:
-        if node_id not in self.nodes:
-            return
+            new_urls = await self.crawl_url(url)
+            for new_url in new_urls:
+                if new_url not in self.visited_urls:
+                    await self.url_queue.put(new_url)
             
-        node = self.nodes[node_id]
-        for url, result in results.items():
-            if url in node.urls_processing:
-                node.urls_processing.remove(url)
-                node.urls_completed.add(url)
-                self.results[url] = result
-                
-        # Update node reliability metrics
-        success_rate = len(results) / max(1, len(node.urls_processing))
-        if success_rate < 0.5:
-            node.failure_count += 1
-        else:
-            node.failure_count = max(0, node.failure_count - 1)
-
-    async def add_urls(self, urls: List[str]) -> None:
-        for url in urls:
-            if url not in self.results:
-                await self.url_queue.put(url)
-
-    def get_stats(self) -> dict:
-        return {
-            'active_nodes': len(self.nodes),
-            'queued_urls': self.url_queue.qsize(),
-            'completed_urls': len(self.results),
-            'node_stats': [
-                {
-                    'id': n.id,
-                    'urls_processing': len(n.urls_processing),
-                    'urls_completed': len(n.urls_completed),
-                    'failure_count': n.failure_count
-                } for n in self.nodes.values()
-            ]
-        }
+            self.url_queue.task_done()
+    
+    async def crawl(self, start_urls: List[str]):
+        await self.initialize()
+        
+        for url in start_urls:
+            await self.url_queue.put(url)
+        
+        workers = [asyncio.create_task(self.worker()) 
+                  for _ in range(self.max_workers)]
+        
+        await self.url_queue.join()
+        
+        for worker in workers:
+            worker.cancel()
+        
+        await self.close()
+        return list(self.visited_urls)
