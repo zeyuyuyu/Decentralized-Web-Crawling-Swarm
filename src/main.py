@@ -1,64 +1,69 @@
-import random
+import os
+import subprocess
 import time
-import json
+import random
+import multiprocessing
 
-class SwarmAgent:
-    def __init__(self, id):
-        self.id = id
-        self.neighbors = []
-        self.state = 'IDLE'
-        self.task_queue = []
+class SwarmOrchestrator:
+    def __init__(self, num_nodes=3):
+        self.num_nodes = num_nodes
+        self.nodes = []
+        self.start_nodes()
 
-    def connect_to_neighbors(self, other_agents):
-        for agent in other_agents:
-            if agent.id != self.id:
-                self.neighbors.append(agent)
+    def start_nodes(self):
+        for _ in range(self.num_nodes):
+            node = DecentralizedNode()
+            node.start()
+            self.nodes.append(node)
 
-    def broadcast_state(self):
-        for neighbor in self.neighbors:
-            neighbor.receive_state_update(self.state, self.task_queue)
-
-    def receive_state_update(self, state, task_queue):
-        self.state = state
-        self.task_queue = task_queue
-
-    def execute_task(self):
-        if self.task_queue:
-            task = self.task_queue.pop(0)
-            print(f'Agent {self.id} executing task: {task}')
-            time.sleep(random.uniform(1, 5))
-            print(f'Agent {self.id} completed task: {task}')
-        else:
-            self.state = 'IDLE'
-
-class SwarmCoordinator:
-    def __init__(self, num_agents):
-        self.agents = [SwarmAgent(i) for i in range(num_agents)]
-        for agent in self.agents:
-            agent.connect_to_neighbors(self.agents)
-
-    def assign_tasks(self, tasks):
-        for task in tasks:
-            agent = self.find_available_agent()
-            if agent:
-                agent.task_queue.append(task)
-                agent.state = 'WORKING'
-
-    def find_available_agent(self):
-        for agent in self.agents:
-            if agent.state == 'IDLE':
-                return agent
-        return None
-
-    def run_swarm(self):
+    def orchestrate(self):
         while True:
-            for agent in self.agents:
-                agent.execute_task()
-                agent.broadcast_state()
+            for node in self.nodes:
+                node.schedule_containers()
+            time.sleep(5)
+
+class DecentralizedNode:
+    def __init__(self):
+        self.containers = []
+        self.resources = {
+            'cpu': 4,
+            'memory': 8192
+        }
+
+    def start(self):
+        process = multiprocessing.Process(target=self.run)
+        process.start()
+
+    def run(self):
+        while True:
+            self.schedule_containers()
             time.sleep(1)
 
+    def schedule_containers(self):
+        if len(self.containers) < 3:
+            container = Container(self)
+            container.start()
+            self.containers.append(container)
+        else:
+            self.balance_containers()
+
+    def balance_containers(self):
+        # Migrate containers to balance resource utilization
+        pass
+
+class Container:
+    def __init__(self, node):
+        self.node = node
+        self.resources = {
+            'cpu': random.randint(1, self.node.resources['cpu']),
+            'memory': random.randint(512, self.node.resources['memory'])
+        }
+
+    def start(self):
+        print(f'Starting container with resources: {self.resources}')
+        # Simulate container startup
+        time.sleep(2)
+
 if __name__ == '__main__':
-    coordinator = SwarmCoordinator(10)
-    tasks = ['Crawl website A', 'Scrape data from website B', 'Index content from website C']
-    coordinator.assign_tasks(tasks)
-    coordinator.run_swarm()
+    orchestrator = SwarmOrchestrator()
+    orchestrator.orchestrate()
